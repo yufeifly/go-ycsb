@@ -1,6 +1,7 @@
 package redisproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,29 +33,37 @@ func (r *redisProxy) CleanupThread(_ context.Context) {
 
 func (r *redisProxy) Read(ctx context.Context, table string, key string, fields []string) (map[string][]byte, error) {
 	data := make(map[string][]byte, len(fields))
-	fmt.Printf("read key: %s/%s\n", table, key)
+	//fmt.Printf("read key: %s/%s\n", table, key)
 	proxyUrl := "http://" + r.proxyAddr + "/redis/get"
-	fmt.Printf("Read url: %v\n", proxyUrl)
+	//fmt.Printf("Read url: %v\n", proxyUrl)
 	req, err := http.NewRequest(http.MethodGet, proxyUrl, nil)
 	if err != nil {
+		logrus.Errorf("Read http.NewRequest err: %v", err)
 		return nil, err
 	}
+	// add params
 	q := req.URL.Query()
 	q.Add("key", table+"/"+key)
 	q.Add("service", "service1")
+	req.URL.RawQuery = q.Encode()
 	// do request
 	resp, err := r.client.Do(req)
 	if err != nil {
+		logrus.Errorf("Read r.client.Do err: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
+		logrus.Errorf("Read ioutil.ReadAll err: %v", err)
 		return nil, err
 	}
-
-	err = json.Unmarshal(body, &data)
+	b := purify(string(body))
+	err = json.Unmarshal([]byte(b), &data)
+	//err = json.NewDecoder(resp.Body).Decode(&data)
 	if err != nil {
+		logrus.Errorf("Read json.Unmarshal err: %v", err)
+		logrus.Infof("Read ioutil.ReadAll body: %v", string(b))
 		return nil, err
 	}
 
@@ -62,32 +71,51 @@ func (r *redisProxy) Read(ctx context.Context, table string, key string, fields 
 	return data, err
 }
 
+// purify solve the escape characters problem of http response
+// todo not so good solution
+func purify(raw string) string {
+	var buf bytes.Buffer
+	for _, ch := range raw {
+		if ch == '\\' {
+			continue
+		}
+		buf.WriteRune(ch)
+	}
+	ans := buf.String()
+	return ans[1 : len(ans)-1]
+}
+
 func (r *redisProxy) Scan(ctx context.Context, table string, startKey string, count int, fields []string) ([]map[string][]byte, error) {
 	return nil, fmt.Errorf("scan of redis proxy is not supported")
 }
 
 func (r *redisProxy) Update(ctx context.Context, table string, key string, values map[string][]byte) error {
-	// get
+	// new get request
 	proxyUrl := "http://" + r.proxyAddr + "/redis/get"
-	fmt.Printf("Read url: %v\n", proxyUrl)
 	req, err := http.NewRequest(http.MethodGet, proxyUrl, nil)
 	if err != nil {
 		return err
 	}
+	// add params
 	q := req.URL.Query()
 	q.Add("key", table+"/"+key)
 	q.Add("service", "service1")
+	req.URL.RawQuery = q.Encode()
+	// do get
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
+
+	b := purify(string(body))
 	curVal := map[string][]byte{}
-	err = json.Unmarshal(body, &curVal)
+	err = json.Unmarshal([]byte(b), &curVal)
 	if err != nil {
 		return err
 	}
@@ -127,7 +155,7 @@ func (r *redisProxy) Insert(ctx context.Context, table string, key string, value
 }
 
 func (r *redisProxy) Delete(ctx context.Context, table string, key string) error {
-	fmt.Printf("Delete key: %s/%s\n", table, key)
+	//fmt.Printf("Delete key: %s/%s\n", table, key)
 	dataBody := url.Values{"key": {table + "/" + key}, "service": {"service1"}}
 	proxySetUrl := "http://" + r.proxyAddr + "/redis/delete"
 	_, err := http.PostForm(proxySetUrl, dataBody)
